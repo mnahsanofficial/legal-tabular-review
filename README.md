@@ -4,7 +4,7 @@ A minimal skeleton for a **Legal Tabular Review** application: ingest legal docu
 
 **Tech stack:** Next.js (frontend), Python FastAPI (backend), in-memory storage.
 
-### Screenshots
+## Screenshots
 
 **Home — Project list & create project**
 

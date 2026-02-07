@@ -5,32 +5,32 @@
 The system is a **full-stack legal document review application** with clear separation between:
 
 - **Frontend (Next.js)**: Project management, document upload/list, tabular review UI, field template management, and export.
-- **Backend (NestJS)**: REST API for projects, documents, field templates, extraction, and table/export generation.
-- **Storage (PostgreSQL)**: Persistent storage for projects, documents, templates, extracted records, and review state.
+- **Backend (Python FastAPI)**: REST API for projects, documents, field templates, extraction, and table/export generation.
+- **Storage (in-memory)**: Python dict-based in-memory stores for projects, documents, templates, and extracted records; no persistent database.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Next.js Frontend                                   │
-│  Projects │ Documents │ Field Templates │ Table Review │ Export (CSV/Excel)  │
+│                           Next.js Frontend                                    │
+│  Projects │ Documents │ Field Templates │ Table Review │ Export (CSV/Excel)   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │ HTTP/REST
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           NestJS Backend                                     │
+│                        Python FastAPI Backend                                 │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────────────┐ │
-│  │   Projects   │ │  Documents    │ │   Templates  │ │ Extraction Service │ │
-│  │   Module     │ │   Module      │ │   Module     │ │ + Normalization     │ │
+│  │   Projects   │ │  Documents    │ │   Templates  │ │ Extraction +        │ │
+│  │   routes     │ │  + Parser     │ │   routes     │ │ Normalization       │ │
 │  └──────────────┘ └──────────────┘ └──────────────┘ └────────────────────┘ │
-│  ┌──────────────┐ ┌──────────────┐                                          │
-│  │ Table/Review │ │   Export     │                                          │
-│  │   Module     │ │   Service    │                                          │
-│  └──────────────┘ └──────────────┘                                          │
+│  ┌──────────────┐ ┌──────────────┐                                         │
+│  │ Table/Review  │ │   Export     │                                         │
+│  │   routes      │ │   (CSV/XLSX) │                                         │
+│  └──────────────┘ └──────────────┘                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                      │ TypeORM
+                                      │ in-memory dicts
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          PostgreSQL                                          │
-│  projects │ documents │ field_templates │ extracted_fields │ review_state   │
+│                        In-memory data stores                                  │
+│  PROJECTS │ DOCUMENTS (by project_id) │ TEMPLATES │ EXTRACTED (by doc_id)   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,59 +38,56 @@ The system is a **full-stack legal document review application** with clear sepa
 
 | Component | Responsibility | Boundaries |
 |-----------|----------------|------------|
-| **Ingestion** | Accept file uploads (or reference paths), parse HTML/PDF/TXT to plain text + structure, store document metadata and raw/parsed content. | Document module + parser service; no extraction logic. |
-| **Extraction** | Run field extraction per document using the active field template; produce value, citation, confidence, raw text. | Extraction service reads template + document content; stateless per run. |
-| **Normalization** | Map extracted values to a unified schema (dates, party names, enums); applied immediately after extraction. | Normalization lives inside extraction service or a dedicated normalizer; same process. |
-| **Storage** | Persist projects, documents, templates, extracted fields, review status. | TypeORM entities and repositories; single DB. |
-| **Review** | Serve side-by-side table (rows = fields, columns = documents), accept status transitions (e.g. pending → extracted → reviewed), store manual overrides. | Table module aggregates extracted data; review state stored per field per document. |
+| **Ingestion** | Accept document paths, parse HTML/PDF/TXT to plain text, store document metadata and content in `DOCUMENTS`. | Parser in `app.py`; path validation and extension checks; no extraction logic. |
+| **Extraction** | Run field extraction per document using the active field template; produce value, citation, confidence, normalized value. | Extraction logic reads template + document content; writes to `EXTRACTED` keyed by document id. |
+| **Normalization** | Map extracted values to a unified schema (dates, party names); applied in the normalizer before persisting. | Normalizer used inside extraction pipeline; same process. |
+| **Storage** | Hold projects, documents, templates, extracted fields, review status in memory. | In-memory dicts: `PROJECTS`, `DOCUMENTS`, `TEMPLATES`, `EXTRACTED`; no DB. To add persistence, replace these with DB access (e.g. PostgreSQL) in the same FastAPI app. |
+| **Review** | Serve side-by-side table (rows = fields, columns = documents), accept PATCH for status/manual value per cell. | Table built by aggregating `EXTRACTED` and project documents; updates scoped to the project’s documents. |
 
 **Data flow (summary):**
 
-1. **Upload** → Document stored (path or content), status = `pending`.
-2. **Extract** → For each document + template: run extraction → normalize → save extracted fields with citation + confidence; status = `extracted`.
-3. **Review** → Table API returns rows (fields) × columns (documents); user can set status (e.g. `confirmed` / `rejected` / `manual_updated`) and optional manual value.
-4. **Export** → Table data (including manual overrides) exported to CSV or Excel.
+1. **Upload** → Document stored in `DOCUMENTS[project_id]` (path, content, status).
+2. **Extract** → For each document + template: run extraction → normalize → write to `EXTRACTED[doc_id]`; set status = `extracted`.
+3. **Review** → Table API reads from `EXTRACTED` and documents; PATCH updates only cells for documents in the given project.
+4. **Export** → Same table data streamed as CSV or Excel.
 
 ## 3. Data Flow: Document Upload → Extraction → Table View
 
 ```
-[User]                [Frontend]              [Backend]                    [DB]
-   │                       │                       │                         │
-   │  Create project       │                       │                         │
-   │─────────────────────>│  POST /projects       │                         │
-   │                       │──────────────────────>│  INSERT project         │
-   │                       │                       │────────────────────────>│
-   │                       │<──────────────────────│                         │
-   │  Add documents        │  POST /projects/:id/documents (path or file)    │
-   │─────────────────────>│──────────────────────>│  Parse → INSERT docs    │
-   │                       │                       │────────────────────────>│
-   │  Set/select template  │  PUT /projects/:id/template                      │
-   │─────────────────────>│──────────────────────>│  Link template          │
-   │                       │                       │────────────────────────>│
-   │  Run extraction       │  POST /projects/:id/extract                     │
-   │─────────────────────>│──────────────────────>│  For each doc:           │
-   │                       │                       │  - Extract fields       │
-   │                       │                       │  - Normalize            │
-   │                       │                       │  - INSERT extracted_*   │
-   │                       │<──────────────────────│                         │
-   │  View table           │  GET /projects/:id/table                        │
-   │─────────────────────>│──────────────────────>│  JOIN fields × docs     │
-   │                       │<──────────────────────│  Rows=fields, Cols=docs │
-   │  Export               │  GET /projects/:id/export?format=csv|excel      │
-   │─────────────────────>│──────────────────────>│  Build file, stream      │
+[User]                [Frontend]              [Backend (FastAPI)]        [In-memory stores]
+   │                       │                       │                              │
+   │  Create project       │                       │                              │
+   │─────────────────────>│  POST /projects       │                              │
+   │                       │──────────────────────>│  PROJECTS[pid] = {...}       │
+   │                       │                       │─────────────────────────────>│
+   │                       │<──────────────────────│                              │
+   │  Add documents        │  POST /projects/:id/documents (paths)                │
+   │─────────────────────>│──────────────────────>│  Parse → DOCUMENTS[pid].append│
+   │                       │                       │─────────────────────────────>│
+   │  Set template         │  PUT /projects/:id/template                          │
+   │─────────────────────>│──────────────────────>│  PROJECTS[pid].templateId     │
+   │                       │                       │─────────────────────────────>│
+   │  Run extraction       │  POST /projects/:id/extract                          │
+   │─────────────────────>│──────────────────────>│  EXTRACTED[doc_id] = [...]    │
+   │                       │<──────────────────────│                              │
+   │  View table           │  GET /projects/:id/table                             │
+   │─────────────────────>│──────────────────────>│  Aggregate from EXTRACTED     │
+   │                       │<──────────────────────│  + DOCUMENTS, TEMPLATES      │
+   │  Export               │  GET /projects/:id/export?format=csv|xlsx            │
+   │─────────────────────>│──────────────────────>│  Build file from table data   │
 ```
 
 ## 4. Storage Strategy
 
-- **Database**: PostgreSQL. Chosen for the required tech stack, ACID guarantees, and simple relational model (projects → documents, templates → extracted_fields, review_state).
-- **Why not in-memory only**: Assignment allows in-memory/JSON for a skeleton; we use PostgreSQL to satisfy the stack requirement and to demonstrate a realistic persistence layer. Migrations define schema; seed or demo script can load sample data from `data/`.
-- **Document content**: Stored as text (parsed from HTML/PDF/TXT) in `documents.content` or `documents.parsed_content` to avoid re-parsing on re-extraction. File binaries can be omitted in skeleton (reference by path or store path).
-- **Field template**: Stored in DB with version id; template JSON/YAML structure in a column or separate `field_templates` table. Re-extraction is triggered when template is updated (template version change or explicit “re-extract” action).
+- **Current**: In-memory Python dicts. `PROJECTS`, `DOCUMENTS` (list per project_id), `TEMPLATES`, `EXTRACTED` (list per document_id). No persistence across process restarts.
+- **Document content**: Stored in each document dict as `content` (parsed text) so re-extraction does not re-read files. Path and status stored for display and validation.
+- **Field templates**: Stored in `TEMPLATES` by id; each has `name` and `fields` (list of field definitions). Default template can be ensured idempotently by name (e.g. "Legal Contract Core").
+- **Where to change**: All storage lives in `backend/app.py`. To add a database, introduce a persistence layer (e.g. SQLAlchemy, asyncpg) and replace reads/writes to these dicts with DB calls; API and route contracts can stay the same.
 
 **Design decisions (short):**
 
-- **NestJS + TypeORM**: Fits required stack; modules map to ingestion, extraction, templates, table, export.
-- **Single extraction service**: Rule-based + mock extraction in one place; easy to swap for LLM later.
-- **Normalization inside extraction pipeline**: Ensures every extracted field has a `normalized_value` before persistence; keeps schema unified.
-- **Table as a read model**: Table endpoint aggregates from `extracted_fields` + `documents` + optional review overrides; no duplicate storage of “table” state.
-- **Export from same table model**: CSV/Excel generated from the same dataset as the table API to guarantee consistency.
+- **FastAPI + in-memory**: Single app file; routes and stores in one place for clarity. Easy to swap to PostgreSQL later by replacing dict access.
+- **Single extraction path**: Rule-based + mock extraction in one place; easy to plug in LLM later.
+- **Normalization in pipeline**: Every extracted field gets `normalized_value` before being stored in `EXTRACTED`.
+- **Table as read model**: Table endpoint aggregates from `EXTRACTED` and project documents; no separate “table” store.
+- **Export from same data**: CSV/Excel built from the same aggregation as the table API.

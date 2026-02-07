@@ -2,6 +2,7 @@
 Legal Tabular Review — FastAPI backend.
 In-memory storage; same API surface as prior NestJS version for frontend compatibility.
 """
+import calendar
 import csv
 import io
 import json
@@ -43,16 +44,41 @@ DEFAULT_TEMPLATE = {
 
 
 # ----- Parser -----
+PERMITTED_EXTENSIONS = {".html", ".htm", ".txt", ".pdf"}
+# Base directory for allowed document paths; resolved path must be under this to prevent path traversal.
+# Set DOCUMENTS_BASE_DIR to the repo root (or parent of cwd) to allow e.g. ../data/ when running from backend/.
+DOCUMENTS_BASE_DIR = Path(os.environ.get("DOCUMENTS_BASE_DIR", ".")).resolve()
+
+
 def parse_from_path(file_path: str) -> tuple[str | None, str | None]:
-    """Return (content, error). Path is relative to cwd or absolute."""
-    abs_path = Path(file_path) if os.path.isabs(file_path) else Path.cwd() / file_path
-    if not abs_path.exists():
-        return None, f"File not found: {file_path}"
-    ext = abs_path.suffix.lower()
+    """Return (content, error). Path is resolved and must be under DOCUMENTS_BASE_DIR; only .html, .htm, .txt, .pdf allowed."""
+    # Resolve to absolute path
+    if os.path.isabs(file_path):
+        resolved = Path(file_path).resolve()
+    else:
+        resolved = (Path.cwd() / file_path).resolve()
+
+    # Restrict to permitted extensions before any file access
+    ext = resolved.suffix.lower()
+    if ext not in PERMITTED_EXTENSIONS:
+        return None, f"Unsupported type: {ext}"
+
+    # Enforce that resolved path is under the allowed base directory (prevent path traversal)
     try:
-        raw = abs_path.read_text(encoding="utf-8", errors="replace")[: 2 * 1024 * 1024]
+        resolved.relative_to(DOCUMENTS_BASE_DIR)
+    except ValueError:
+        return None, "File not allowed"
+
+    if not resolved.exists():
+        return None, f"File not found: {file_path}"
+    if not resolved.is_file():
+        return None, f"Not a file: {file_path}"
+
+    try:
+        raw = resolved.read_text(encoding="utf-8", errors="replace")[: 2 * 1024 * 1024]
     except Exception as e:
         return None, str(e)
+
     if ext in (".html", ".htm"):
         text = re.sub(r"<script[\s\S]*?</script>", "", raw, flags=re.I)
         text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
@@ -62,9 +88,9 @@ def parse_from_path(file_path: str) -> tuple[str | None, str | None]:
     if ext == ".txt":
         return raw.strip(), None
     if ext == ".pdf":
-        name = abs_path.name
+        name = resolved.name
         return f"[PDF: {name}] Mock text. Effective Date: January 15, 2020. Party A: Acme Corp. Party B: Beta Inc. Document Type: Supply Agreement. Governing Law: Delaware. Term: 3 years. Termination Notice: 90 days.", None
-    return raw, f"Unsupported type: {ext}"
+    return None, f"Unsupported type: {ext}"
 
 
 # ----- Normalizer -----
@@ -81,8 +107,16 @@ def to_iso_date(s: str) -> str | None:
     for name, mm in MONTHS.items():
         m = re.search(rf"(\d{{1,2}})?\s*{name}\s*(\d{{1,2}})?,?\s*(\d{{4}})", s, re.I)
         if m:
-            day = (m.group(1) or m.group(2) or "1").zfill(2)
-            return f"{m.group(3)}-{mm}-{day}"
+            try:
+                year = int(m.group(3))
+                month = int(mm)
+                day_val = int(m.group(1) or m.group(2) or "1")
+            except (ValueError, TypeError):
+                continue
+            _, last_day = calendar.monthrange(year, month)
+            if not (1 <= day_val <= last_day):
+                continue
+            return f"{year}-{mm}-{day_val:02d}"
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
@@ -285,7 +319,6 @@ class UpdateCell(BaseModel):
 
 # ----- Data directory (sample files) -----
 DATA_DIR = os.environ.get("DATA_DIR", "../data")
-ALLOWED_EXTENSIONS = {".html", ".htm", ".pdf", ".txt"}
 
 
 def list_data_files() -> list[dict]:
@@ -296,7 +329,7 @@ def list_data_files() -> list[dict]:
     out = []
     base = DATA_DIR.rstrip("/")
     for f in sorted(data_path.iterdir()):
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+        if f.is_file() and f.suffix.lower() in PERMITTED_EXTENSIONS:
             # Path that parse_from_path can resolve: relative to cwd
             path_str = f"{base}/{f.name}" if base else f.name
             out.append({"path": path_str, "name": f.name})
@@ -414,6 +447,10 @@ def list_templates():
 
 @app.post("/templates/ensure-default")
 def ensure_default_template():
+    default_name = DEFAULT_TEMPLATE.get("name", "Legal Contract Core")
+    for tid, t in TEMPLATES.items():
+        if t.get("name") == default_name:
+            return t
     tid = str(uuid.uuid4())
     TEMPLATES[tid] = {"id": tid, **DEFAULT_TEMPLATE}
     return TEMPLATES[tid]
@@ -461,7 +498,11 @@ def get_table_route(project_id: str):
 
 @app.patch("/projects/{project_id}/table")
 def update_cell(project_id: str, body: UpdateCell):
-    for doc_id, items in EXTRACTED.items():
+    if project_id not in PROJECTS:
+        raise HTTPException(404, "Project not found")
+    project_doc_ids = {d["id"] for d in DOCUMENTS.get(project_id, [])}
+    for doc_id in project_doc_ids:
+        items = EXTRACTED.get(doc_id, [])
         for ef in items:
             if ef["documentId"] == body.documentId and ef["fieldId"] == body.fieldId:
                 if body.reviewStatus is not None:
@@ -494,7 +535,7 @@ def export_table(project_id: str, format: str = "csv"):
     buf = io.StringIO()
     writer = csv.writer(buf)
     for row in rows:
-        writer.writerow([escape_csv(str(c)) for c in row])
+        writer.writerow([str(c) for c in row])
     return StreamingResponse(
         io.BytesIO(("\uFEFF" + buf.getvalue()).encode("utf-8")),
         media_type="text/csv; charset=utf-8",

@@ -24,6 +24,10 @@ echo "   Template ID: $TEMPLATE_ID"
 echo "2. Creating project..."
 PROJECT=$(curl -s -X POST "$API/projects" -H "Content-Type: application/json" -d '{"name":"Dataset Test Project"}')
 PROJECT_ID=$(echo "$PROJECT" | jq -r '.id')
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+  echo "   Failed to get project. Response: $PROJECT"
+  exit 1
+fi
 echo "   Project ID: $PROJECT_ID"
 
 # 3) Link template
@@ -47,7 +51,7 @@ ROWS=$(echo "$TABLE" | jq '.rows | length')
 DOCS=$(echo "$TABLE" | jq '.documents | length')
 echo "   Rows (fields): $ROWS, Columns (documents): $DOCS"
 
-FIELDS_OK=$(echo "$TABLE" | jq '[.rows[].cells[] | select(.value != null and .value != "") or select(.citation != null) or (.confidence != null and .confidence >= 0)] | length')
+FIELDS_OK=$(echo "$TABLE" | jq '[.rows[].cells[] | select((.value != null and .value != "") or (.citation != null) or (.confidence != null and .confidence >= 0))] | length')
 CELLS=$(echo "$TABLE" | jq '[.rows[].cells[]] | length')
 echo "   Cells with value/citation/confidence: $FIELDS_OK / $CELLS"
 

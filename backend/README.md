@@ -24,7 +24,9 @@ curl -X POST http://localhost:4000/templates/ensure-default
 
 ## Document paths
 
-Paths in `POST /projects/:id/documents` are relative to the **process cwd**. When running from `backend/`, use `../data/EX-10.2.html` to point at the repo `data/` folder.
+Paths in `POST /projects/:id/documents` are resolved and must lie under an allowed base directory (no path traversal). Only `.html`, `.htm`, `.txt`, and `.pdf` are permitted.
+
+- **DOCUMENTS_BASE_DIR** (env): Base directory for allowed files; default is the process cwd. To allow `../data/` when running from `backend/`, set it to the repo root, e.g. `export DOCUMENTS_BASE_DIR=/path/to/legal-tabular-review` or `DOCUMENTS_BASE_DIR=..` (parent of cwd).
 
 ## Dataset test
 
