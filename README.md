@@ -4,6 +4,26 @@ A minimal skeleton for a **Legal Tabular Review** application: ingest legal docu
 
 **Tech stack:** Next.js (frontend), Python FastAPI (backend), in-memory storage.
 
+### Screenshots
+
+**Home — Project list & create project**
+
+![Home page](docs/screenshots/home.png)
+
+Create projects and open any project by clicking the full card. Each card shows the project name and document count.
+
+**Project — Documents**
+
+![Documents section](docs/screenshots/project-documents.png)
+
+Add documents via pre-filled paths (from the repo `data/` folder) or by entering paths manually. Click **Add from paths** to ingest. The list shows each document and its status (extracted, pending, or failed). Duplicate paths are skipped.
+
+**Project — Field template, extraction, export & review table**
+
+![Review table](docs/screenshots/project-review-table.png)
+
+Select a field template, run extraction, then view the side-by-side review table (one row per field, one column group per document with Value, Citation, Confidence). Export to CSV or Excel.
+
 ---
 
 ## Project overview
@@ -148,4 +168,4 @@ Document paths are relative to the **backend** process current working directory
 - **backend/** — Python FastAPI app (ingestion, extraction, table, export).
 - **frontend/** — Next.js app (project list, project detail, table, export).
 - **data/** — Sample legal documents for ingestion and testing.
-- **docs/** — ARCHITECTURE.md, FUNCTIONAL_DESIGN.md, REQUIREMENTS.md.
+- **docs/** — ARCHITECTURE.md, FUNCTIONAL_DESIGN.md, REQUIREMENTS.md, screenshots/ (UI screenshots).
